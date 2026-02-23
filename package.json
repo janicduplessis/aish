@@ -1,0 +1,30 @@
+{
+  "name": "aish-cli",
+  "version": "1.0.0",
+  "description": "AI Shell - convert natural language to bash commands using Claude or Codex",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/janicduplessis/aish.git"
+  },
+  "keywords": ["ai", "shell", "cli", "claude", "codex", "bash", "natural-language"],
+  "bin": {
+    "aish": "./dist/index.js"
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsx src/index.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^7.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "tsup": "^8.4.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0"
+  }
+}
