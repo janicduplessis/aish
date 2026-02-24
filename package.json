@@ -8,11 +8,22 @@
     "type": "git",
     "url": "https://github.com/janicduplessis/aish.git"
   },
-  "keywords": ["ai", "shell", "cli", "claude", "codex", "bash", "natural-language"],
+  "keywords": [
+    "ai",
+    "shell",
+    "cli",
+    "claude",
+    "codex",
+    "bash",
+    "natural-language"
+  ],
   "bin": {
     "aish": "./dist/index.js"
   },
-  "files": ["dist"],
+  "files": [
+    "dist",
+    "aish.plugin.zsh"
+  ],
   "scripts": {
     "build": "tsup",
     "dev": "tsx src/index.ts",

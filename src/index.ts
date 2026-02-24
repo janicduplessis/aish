@@ -1,4 +1,4 @@
-import { queryAi, setVerbose, type Provider } from "./ai.js";
+import { queryAi, cacheSet, setVerbose, type Provider } from "./ai.js";
 import { promptCommand } from "./ui.js";
 import { execCommand } from "./exec.js";
 
@@ -24,12 +24,14 @@ function parseArgs(argv: string[]): {
   cwd: string;
   model?: string;
   verbose: boolean;
+  print: boolean;
 } {
   const args = argv.slice(2);
   let provider: Provider = (process.env.AISH_PROVIDER as Provider) || "claude";
   let cwd = process.cwd();
   let model: string | undefined = process.env.AISH_MODEL || undefined;
   let verbose = false;
+  let print = false;
   const queryParts: string[] = [];
 
   for (let i = 0; i < args.length; i++) {
@@ -47,6 +49,8 @@ function parseArgs(argv: string[]): {
       model = args[++i];
     } else if (arg === "-v" || arg === "--verbose") {
       verbose = true;
+    } else if (arg === "--print") {
+      print = true;
     } else if (arg === "-h" || arg === "--help") {
       console.log(`Usage: aish [options] <query...>
 
@@ -54,19 +58,24 @@ Options:
   -p, --provider <claude|codex>  AI provider (default: claude, env: AISH_PROVIDER)
   -m, --model <model>            Model override (env: AISH_MODEL)
   --cwd <dir>                    Working directory
+  --print                        Output command only (for shell integration)
   -v, --verbose                  Show debug output
-  -h, --help                     Show help`);
+  -h, --help                     Show help
+
+Zsh Integration:
+  Add to .zshrc: source "$(npm root -g)/aish-cli/aish.plugin.zsh"
+  Then press Ctrl+G to activate AI mode`);
       process.exit(0);
     } else {
       queryParts.push(arg);
     }
   }
 
-  return { query: queryParts.join(" "), provider, cwd, model, verbose };
+  return { query: queryParts.join(" "), provider, cwd, model, verbose, print };
 }
 
 async function main() {
-  const { query, provider, cwd, model, verbose } = parseArgs(process.argv);
+  const { query, provider, cwd, model, verbose, print } = parseArgs(process.argv);
   setVerbose(verbose);
 
   if (!query) {
@@ -74,21 +83,35 @@ async function main() {
     process.exit(1);
   }
 
-  const stopSpinner = verbose ? () => {} : startSpinner("Thinking...");
+  const stopSpinner = verbose || print ? () => {} : startSpinner("Thinking...");
   let commands: string[];
+  let resultCacheKey: string | undefined;
   try {
     const result = await queryAi(provider, query, cwd, model);
     commands = result.commands;
+    resultCacheKey = result.cacheKey;
   } catch (err: any) {
     stopSpinner();
+    if (print) {
+      process.exit(1);
+    }
     console.error(`${RED}Error: ${err.message}${RESET}`);
     process.exit(1);
   }
   stopSpinner();
 
   if (commands.length === 0) {
+    if (print) {
+      process.exit(1);
+    }
     console.error(`${RED}No commands suggested.${RESET}`);
     process.exit(1);
+  }
+
+  // Print mode: output command and exit (no cache - caller handles acceptance)
+  if (print) {
+    console.log(commands[0]);
+    process.exit(0);
   }
 
   let chosen: string | null;
@@ -102,6 +125,11 @@ async function main() {
 
   if (!chosen) {
     process.exit(0);
+  }
+
+  // Cache after user accepts
+  if (resultCacheKey) {
+    await cacheSet(resultCacheKey, { commands });
   }
 
   const exitCode = await execCommand(chosen, cwd);
