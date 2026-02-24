@@ -1,4 +1,4 @@
-import { queryAi, cacheSet, setVerbose, type Provider } from "./ai.js";
+import { queryAi, cacheSet, setVerbose, type Provider, type AiStats } from "./ai.js";
 import { promptCommand } from "./ui.js";
 import { execCommand } from "./exec.js";
 
@@ -86,10 +86,12 @@ async function main() {
   const stopSpinner = verbose || print ? () => {} : startSpinner("Thinking...");
   let commands: string[];
   let resultCacheKey: string | undefined;
+  let stats: AiStats | undefined;
   try {
     const result = await queryAi(provider, query, cwd, model);
     commands = result.commands;
     resultCacheKey = result.cacheKey;
+    stats = result.stats;
   } catch (err: any) {
     stopSpinner();
     if (print) {
@@ -99,6 +101,25 @@ async function main() {
     process.exit(1);
   }
   stopSpinner();
+
+  // Show stats footer
+  if (stats) {
+    const parts: string[] = [];
+    if (stats.cached) {
+      parts.push("cached");
+    } else {
+      if (stats.durationMs) parts.push(`${(stats.durationMs / 1000).toFixed(1)}s`);
+      if (stats.inputTokens || stats.outputTokens) {
+        parts.push(`${stats.inputTokens || 0}→${stats.outputTokens || 0} tok`);
+      }
+      if (stats.cost) parts.push(`$${stats.cost.toFixed(4)}`);
+    }
+    if (parts.length > 0) {
+      // Use stderr in print mode so it doesn't interfere with command output
+      const output = print ? process.stderr : process.stdout;
+      output.write(`${DIM}  ${parts.join(" · ")}${RESET}\n`);
+    }
+  }
 
   if (commands.length === 0) {
     if (print) {

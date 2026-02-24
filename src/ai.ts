@@ -4,62 +4,78 @@ import { createHash } from "node:crypto";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 
+export interface AiStats {
+  durationMs?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cost?: number;
+  cached?: boolean;
+}
+
 export interface AiResult {
   commands: string[];
   cacheKey?: string;
+  stats?: AiStats;
 }
 
 const SYSTEM_PROMPT = `You are a CLI assistant that converts natural language into the exact shell commands to run.
 
-Some project files are provided below for reference so you don't need to read them yourself.
-
 GUIDELINES:
-1. Review the project files provided below to understand available scripts and commands.
-2. If you need more context, use the Read tool to look at relevant files (scripts, configs, docs).
-3. Prefer existing scripts/targets from package.json, Makefile, etc. over raw commands.
-4. If unsure about exact flags, use common/standard ones or provide multiple options.
+1. For standard commands (git, ls, curl, etc.), respond immediately without reading files.
+2. For project-specific commands (build, test, run scripts, etc.), ALWAYS read README.md first (if it exists), then the relevant config file:
+   - Node.js: package.json
+   - Python: pyproject.toml, setup.py, or Pipfile
+   - Rust: Cargo.toml
+   - Go: go.mod
+   - Ruby: Gemfile
+   - Make: Makefile
+   - Other: Justfile, Taskfile.yml
+3. ALWAYS prefer project scripts over direct tool invocation:
+   - Use "npm run build" not "tsup" or "tsc"
+   - Use "make test" not the underlying test command
+   - Use "cargo build" not "rustc" directly
+   This ensures correct flags, environment, and project configuration.
+4. If unsure about exact flags, provide multiple options.
 
 RESPONSE FORMAT — THIS IS CRITICAL:
 Your final message MUST be ONLY a JSON object. No prose, no explanation, no "Based on...", no markdown.
 Exactly this format: {"commands": ["command1"]}
 If you are unsure which command the user wants, return multiple options and the user will pick: {"commands": ["option1", "option2"]}
-Prefer existing scripts/targets with correct flags over raw commands.
 For values the user hasn't specified, use <placeholders> like: git commit -m "<message>" or curl <url>. Use descriptive names inside the angle brackets.`;
 
-const PROJECT_FILES = [
-  "Makefile",
-  "package.json",
-  "README.md",
-  "Justfile",
-  "Taskfile.yml",
-  "docker-compose.yml",
-  "Cargo.toml",
-  "pyproject.toml",
-  "Gemfile",
+// Detect tooling based on lockfiles and config files
+const TOOL_HINTS: Array<{ files: string[]; hint: string }> = [
+  { files: ["bun.lockb", "bun.lock"], hint: "Use bun (not npm/yarn/pnpm)" },
+  { files: ["pnpm-lock.yaml"], hint: "Use pnpm (not npm/yarn)" },
+  { files: ["yarn.lock"], hint: "Use yarn (not npm/pnpm)" },
+  { files: ["package-lock.json"], hint: "Use npm (not yarn/pnpm)" },
+  { files: ["Cargo.lock"], hint: "Use cargo for Rust commands" },
+  { files: ["poetry.lock"], hint: "Use poetry (not pip)" },
+  { files: ["Pipfile.lock"], hint: "Use pipenv (not pip)" },
+  { files: ["uv.lock"], hint: "Use uv (not pip/poetry)" },
+  { files: ["Gemfile.lock"], hint: "Use bundle exec for Ruby commands" },
+  { files: ["go.sum"], hint: "Use go modules" },
+  { files: ["flake.lock"], hint: "Nix flake project - use nix commands" },
 ];
 
-const MAX_FILE_SIZE = 4000;
-
 async function gatherProjectContext(cwd: string): Promise<string> {
-  const sections: string[] = [];
-  const found: string[] = [];
-  for (const file of PROJECT_FILES) {
-    const filePath = join(cwd, file);
-    try {
-      await access(filePath);
-      let content = await readFile(filePath, "utf-8");
-      if (content.length > MAX_FILE_SIZE) {
-        content = content.slice(0, MAX_FILE_SIZE) + "\n...(truncated)";
+  const hints: string[] = [];
+  for (const { files, hint } of TOOL_HINTS) {
+    for (const file of files) {
+      try {
+        await access(join(cwd, file));
+        hints.push(hint);
+        break; // Only add hint once per tool
+      } catch {
+        // File doesn't exist
       }
-      sections.push(`--- ${file} ---\n${content}`);
-      found.push(file);
-    } catch {
-      // File doesn't exist, skip
     }
   }
-  if (found.length > 0) logVerbose(`  context: ${found.join(", ")}`);
-  if (sections.length === 0) return "";
-  return `\n\nProject files:\n\n${sections.join("\n\n")}`;
+
+  if (hints.length > 0) logVerbose(`  hints: ${hints.join(", ")}`);
+
+  if (hints.length === 0) return "";
+  return `\n\nTool hints:\n- ${hints.join("\n- ")}`;
 }
 
 let verbose = false;
@@ -231,7 +247,7 @@ async function queryClaude(query: string, cwd: string, model?: string): Promise<
   const cached = await cacheGet(key);
   if (cached) {
     logVerbose("  cache: hit");
-    return cached;
+    return { ...cached, stats: { cached: true } };
   }
 
   const prompt = `${SYSTEM_PROMPT}${context}\n\nUser request: ${query}`;
@@ -249,11 +265,21 @@ async function queryClaude(query: string, cwd: string, model?: string): Promise<
 
   // claude --output-format json wraps the response in a JSON object with a "result" field
   let text = stdout.trim();
+  let stats: AiStats = {};
   try {
     const wrapper = JSON.parse(text);
     if (verbose) {
       logVerbose(formatStats(wrapper));
       if (wrapper.result) logVerbose(`  result: ${wrapper.result}`);
+    }
+    // Extract stats
+    stats.durationMs = wrapper.duration_ms;
+    stats.cost = wrapper.total_cost_usd;
+    if (wrapper.usage) {
+      stats.inputTokens = (wrapper.usage.input_tokens || 0) +
+        (wrapper.usage.cache_creation_input_tokens || 0) +
+        (wrapper.usage.cache_read_input_tokens || 0);
+      stats.outputTokens = wrapper.usage.output_tokens || 0;
     }
     if (wrapper.result) {
       text = wrapper.result;
@@ -265,10 +291,12 @@ async function queryClaude(query: string, cwd: string, model?: string): Promise<
 
   const result = parseResponse(text);
   result.cacheKey = key;
+  result.stats = stats;
   return result;
 }
 
 async function queryCodex(query: string, cwd: string, model?: string): Promise<AiResult> {
+  const startTime = Date.now();
   const context = await gatherProjectContext(cwd);
   const resultFile = join(tmpdir(), `aish-codex-${Date.now()}.txt`);
   const prompt = `${SYSTEM_PROMPT}${context}\n\nUser request: ${query}`;
@@ -276,6 +304,8 @@ async function queryCodex(query: string, cwd: string, model?: string): Promise<A
     "exec",
     "--sandbox",
     "read-only",
+    "-c",
+    "model_reasoning_effort=\"low\"",
     "-o",
     resultFile,
     "-",  // Read prompt from stdin
@@ -289,7 +319,9 @@ async function queryCodex(query: string, cwd: string, model?: string): Promise<A
   const text = await readFile(resultFile, "utf-8");
   await unlink(resultFile).catch(() => {});
 
-  return parseResponse(text);
+  const result = parseResponse(text);
+  result.stats = { durationMs: Date.now() - startTime };
+  return result;
 }
 
 export type Provider = "claude" | "codex";

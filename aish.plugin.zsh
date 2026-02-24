@@ -327,13 +327,19 @@ Respond with only the updated command."
     wait $pid 2>/dev/null
     local exit_code=$?
     cmd=$(<"$tmpfile")
-    local errmsg=$(<"$errfile")
+    local stats=$(<"$errfile")
     rm -f "$tmpfile" "$errfile"
+
+    # Strip ANSI codes from stats for clean display
+    stats="${stats//$'\e[2m'/}"
+    stats="${stats//$'\e[0m'/}"
+    stats="${stats## }"  # trim leading space
+    stats="${stats%%$'\n'}"  # trim trailing newline
 
     if [[ $exit_code -ne 0 ]]; then
       # Show error briefly
       BUFFER=""
-      POSTDISPLAY=$'\n  '"Error: ${errmsg:-aish command failed}"
+      POSTDISPLAY=$'\n  '"Error: ${stats:-aish command failed}"
       region_highlight=()
       zle -R
       sleep 2
@@ -369,10 +375,11 @@ Command: ${cmd}"
 Command: ${cmd}"
       fi
 
-      # Show result with hints
+      # Show result with hints and stats
       BUFFER="$cmd"
       CURSOR=${#BUFFER}
       local hints=$'\n  tab: refine  │  enter: accept  │  esc: cancel'
+      [[ -n "$stats" ]] && hints+="  │  ${stats}"
       POSTDISPLAY="$hints"
       # Highlight POSTDISPLAY area (starts after BUFFER)
       local hint_start=${#BUFFER}
